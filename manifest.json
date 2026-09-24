@@ -1,0 +1,29 @@
+{
+    "schema": 1,
+    "format": "star-empire-mod",
+    "mod_id": "menu-icons",
+    "name": "Menu Icons",
+    "version": "0.1.0",
+    "author": "wkthedev",
+    "description": "Replaces the bottom-right HUD row and its Menu dropup with one row of icon buttons for every action (Galaxy, Squad, Minimap, Stats, Friends, Missions, Coalition, Attendance, Market, Options).",
+    "loader_api": 2,
+    "entrypoint": "menu_icons.main:apply",
+    "files": [
+        "mod/menu_icons/README.md",
+        "mod/menu_icons/icons/bar_chart_2.png",
+        "mod/menu_icons/icons/calendar.png",
+        "mod/menu_icons/icons/flag.png",
+        "mod/menu_icons/icons/globe.png",
+        "mod/menu_icons/icons/map.png",
+        "mod/menu_icons/icons/settings.png",
+        "mod/menu_icons/icons/shield.png",
+        "mod/menu_icons/icons/shopping_cart.png",
+        "mod/menu_icons/icons/user_plus.png",
+        "mod/menu_icons/icons/users.png",
+        "mod/menu_icons/main.py"
+    ],
+    "dependencies": [],
+    "conflicts": [],
+    "load_after": [],
+    "permissions": []
+}
