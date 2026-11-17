@@ -1,5 +1,5 @@
 """Menu Icons: replaces the entire bottom-right HUD row (Menu/Minimap/Squad/
-Galaxy + the Menu dropup's six items) with one row of uniform icon buttons.
+Galaxy + the Menu dropup's items) with one row of uniform icon buttons.
 No dropup is drawn at all -- everything lives directly in the row.
 
 Approach:
@@ -11,8 +11,8 @@ Approach:
   * self._menu_btn_rect is set to None every frame, so the original
     "toggle _menu_open" click handler never fires and the now-orphaned
     dropup (_draw_menu_popup) never draws -- no need to patch it at all.
-  * The six former dropup items (stats/friends/missions/coalition/
-    attendance/market) have no ungated native click path once _menu_open
+  * The former dropup items (stats/friends/missions/run summary/coalition/
+    attendance/market/shop) have no ungated native click path once _menu_open
     can never become true, so this mod owns their clicks itself via the
     client.event hook.
   * Right-clicking the Universe Map (galaxy) icon copies the current system
@@ -20,9 +20,27 @@ Approach:
     Native code only ever looks at button 1 (left-click) for this whole
     launcher row, so button 3 is free for this mod to use outright -- no
     race with native handling to work around here.
+
+Game 0.5.82 added two Menu entries (Client.py _draw_menu_popup): RUN SUMMARY
+(run_summary_gui.toggle) and SHOP (premium_shop.open_shop, only listed while
+the server enables the shop). Both now get a button here too; the Shop one
+only appears while host._premium_shop.enabled, like the native row, and uses
+the game's own gold gem as its icon.
 """
+import importlib
+import logging
 import os
+import sys
 import time
+
+_log = logging.getLogger("star_empire_mod.menu-icons")
+_warned = set()
+
+
+def _warn_once(key, msg):
+    if key not in _warned:
+        _warned.add(key)
+        _log.warning("menu-icons: %s", msg)
 
 _ICON_FILES = {
     "galaxy": "globe.png",
@@ -31,6 +49,7 @@ _ICON_FILES = {
     "stats": "bar_chart_2.png",
     "friends": "users.png",
     "missions": "flag.png",
+    "runs": "clipboard.png",
     "coalition": "shield.png",
     "attendance": "calendar.png",
     "market": "shopping_cart.png",
@@ -39,8 +58,8 @@ _ICON_FILES = {
 
 # Items this mod owns clicks for (galaxy/squad/minimap keep native handling).
 _MOD_OWNED_KEYS = (
-    "stats", "friends", "missions", "coalition", "attendance", "market",
-    "options")
+    "stats", "friends", "missions", "runs", "coalition", "attendance",
+    "market", "shop", "options")
 
 _icons = {}
 _item_rects = {}
@@ -82,6 +101,89 @@ def _open_market(host):
 
 _pending_open_options = [False]
 _pending_mission_target = [None]
+_pending_runs_target = [None]
+_pending_open_shop = [False]
+
+
+def _game_module(name):
+    """A loose game module (run_summary_gui, premium_shop), or None. Client.py
+    imports both itself, so they are normally already in sys.modules."""
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        _warn_once("import:" + name, f"game module {name} unavailable")
+        return None
+
+
+def _runs_state(host):
+    """(open, attention, meta) of the Run Summary window, or None when this
+    game build has none."""
+    state = getattr(host, "_run_summary", None)
+    if state is None:
+        return None
+    try:
+        meta, new = state.menu_meta()
+    except Exception:
+        meta, new = "", False
+    return bool(getattr(state, "open", False)), bool(new), str(meta or "")
+
+
+def _shop_state(host):
+    """(enabled, open) of the premium shop, or (False, False)."""
+    shop = getattr(host, "_premium_shop", None)
+    if shop is None:
+        return False, False
+    return (bool(getattr(shop, "enabled", False)),
+            bool(getattr(shop, "open", False)))
+
+
+def _open_runs(host):
+    # Deferred like Missions (see _open_missions): applied on the next
+    # client.frame.begin, after native handling of this click has run.
+    state = _runs_state(host)
+    if state is not None:
+        _pending_runs_target[0] = not state[0]
+
+
+def _apply_pending_runs(host):
+    target = _pending_runs_target[0]
+    if target is None:
+        return
+    _pending_runs_target[0] = None
+    state = _runs_state(host)
+    if state is None or state[0] == target:
+        return
+    module = _game_module("run_summary_gui")
+    if module is None:
+        return
+    try:
+        module.toggle(host)       # what the Menu's RUN SUMMARY row calls
+    except Exception:
+        _log.exception("menu-icons: toggling Run Summary failed")
+
+
+def _open_shop(host):
+    _pending_open_shop[0] = True
+
+
+def _apply_pending_shop(host):
+    if not _pending_open_shop[0]:
+        return
+    _pending_open_shop[0] = False
+    module = _game_module("premium_shop")
+    if module is None:
+        return
+    try:
+        # Mirrors the Menu's SHOP row (Client.py menu popup click handler).
+        host._menu_open = False
+        module.open_shop(host)
+        if host._galaxy_map_open:
+            host._close_galaxy_map()
+    except Exception:
+        _log.exception("menu-icons: opening the Shop failed")
 
 
 def _open_missions(host):
@@ -145,15 +247,19 @@ def _apply_pending_options(host):
 def _on_frame_begin(host, render_target):
     _apply_pending_options(host)
     _apply_pending_missions(host)
+    _apply_pending_runs(host)
+    _apply_pending_shop(host)
 
 
 _ACTIONS = {
     "stats": lambda host: host._toggle_stats_panel(),
     "friends": lambda host: host._toggle_friends_panel(),
     "missions": _open_missions,
+    "runs": _open_runs,
     "coalition": lambda host: host._toggle_coalition_panel(),
     "attendance": _open_attendance,
     "market": _open_market,
+    "shop": _open_shop,
     "options": _open_options,
 }
 
@@ -177,6 +283,8 @@ def _make_draw_hud_launchers(pygame):
         friends_pending = int(self._friends_state.get("pending_count", 0) or 0)
         attendance_ready = self._attendance_gui.notification_count
         squad_has_members = bool(self._squad_state.get("members"))
+        runs = _runs_state(self)
+        shop_enabled, shop_open = _shop_state(self)
 
         # (key, active, attention, tooltip title, tooltip subtitle or None)
         items = [
@@ -188,12 +296,20 @@ def _make_draw_hud_launchers(pygame):
              "Friends", None),
             ("missions", self._mission_log_open, bool(mission_ready),
              "Missions", None),
+        ]
+        if runs is not None:
+            items.append(("runs", runs[0], runs[1], "Run Summary",
+                          runs[2] or None))
+        items += [
             ("coalition", self._coalition_open, False, "Coalition", None),
             ("attendance", self._attendance_gui.open, bool(attendance_ready),
              "Attendance Rewards", None),
             ("market", self._market_open, False, "Global Market", None),
-            ("options", self._esc_menu_open, False, "Options", None),
         ]
+        if shop_enabled:
+            items.append(("shop", shop_open, False, "Shop", None))
+        items.append(
+            ("options", self._esc_menu_open, False, "Options", None))
 
         total_w = (
             sum(widths.get(key, btn) for key, *_r in items)
@@ -255,6 +371,10 @@ def _make_draw_hud_launchers(pygame):
                     screen.blit(name_label, (
                         text_left,
                         rect.centery - name_label.get_height() // 2))
+                elif key == "shop":
+                    gem = _shop_icon()
+                    if gem is not None:
+                        screen.blit(gem, gem.get_rect(center=rect.center))
                 elif icon is not None:
                     screen.blit(icon, icon.get_rect(center=rect.center))
 
@@ -311,7 +431,7 @@ def _make_draw_hud_launchers(pygame):
             bool(self._friends_open), bool(self._mission_log_open),
             bool(self._coalition_open), bool(self._attendance_gui.open),
             bool(self._market_open), bool(self._esc_menu_open),
-            squad_has_members, mouse,
+            squad_has_members, runs, shop_enabled, shop_open, mouse,
         )
         self._draw_retained_gpu_layer("hud:launchers", ctx, state_key, draw)
 
@@ -321,7 +441,34 @@ def _make_draw_hud_launchers(pygame):
         # every frame while active instead of going through that cache.
         _draw_toast(pygame, self, ctx, rects.get("galaxy"))
 
-    return _draw_hud_launchers_icons
+    def patched(self, ctx, *args, **kwargs):
+        # A game update that renames anything read above must not take the
+        # whole HUD row down: log once and draw the game's own row instead.
+        if not _icons_failed[0]:
+            try:
+                return _draw_hud_launchers_icons(self, ctx)
+            except Exception:
+                _icons_failed[0] = True
+                _item_rects.clear()
+                _log.exception(
+                    "menu-icons: icon row failed; using the game's own row")
+        return _original_draw_hud_launchers(self, ctx, *args, **kwargs)
+
+    return patched
+
+
+_icons_failed = [False]
+
+
+def _shop_icon():
+    """The game's own premium-currency gem (premium_shop.gem_surface), the
+    mark the native Menu's SHOP row carries."""
+    module = _game_module("premium_shop")
+    try:
+        return module.gem_surface(22) if module is not None else None
+    except Exception:
+        _warn_once("gem", "premium_shop.gem_surface failed; Shop has no icon")
+        return None
 
 
 def _draw_toast(pygame, self, ctx, anchor_rect):
@@ -365,7 +512,10 @@ def _on_startup(host, pygame, screen):
 
     cls = type(host)
     _patched_class = cls
-    _original_draw_hud_launchers = cls._draw_hud_launchers
+    _original_draw_hud_launchers = getattr(cls, "_draw_hud_launchers", None)
+    if _original_draw_hud_launchers is None:
+        _log.warning("menu-icons: _draw_hud_launchers missing; not patched")
+        return
     cls._draw_hud_launchers = _make_draw_hud_launchers(pygame)
 
 
@@ -407,7 +557,9 @@ def _on_shutdown(**_kwargs):
 
 
 def apply(api):
+    global _log
     _install_path[0] = api.install_path
+    _log = api.logger
     api.on("client.startup", _on_startup)
     api.on("client.frame.begin", _on_frame_begin)
     api.on("client.event", _on_event)
