@@ -1,31 +1,40 @@
-"""Menu Icons: replaces the entire bottom-right HUD row (Menu/Minimap/Squad/
-Galaxy + the Menu dropup's items) with one row of uniform icon buttons.
-No dropup is drawn at all -- everything lives directly in the row.
+"""Menu Icons: replaces the bottom-right HUD row (Menu/Minimap/Squad/Galaxy +
+the Menu dropup's items) with a RuneScape-style icon bar: a few always-visible
+buttons plus category buttons that drop up into a strip of more icons.
+
+Layout (left to right):  Universe Map | Squad | Minimap | Character | Social |
+Economy | Options.  Character, Social and Economy are categories; clicking one
+drops a strip of icons up above it (click again, click elsewhere or press Esc to
+close):
+  * Character: Stats, Missions, Run Summary, Mechlings
+  * Social:    Friends, Coalition, Mail
+  * Economy:   Global Market, Attendance Rewards, Shop (only while the server
+               enables it)
+A category shows a red dot while anything inside it needs attention.
 
 Approach:
-  * Patches SolarSystemWindow._draw_hud_launchers (render_mixin.py) to draw
-    nine icon buttons instead of the original four text buttons.
+  * Patches SolarSystemWindow._draw_hud_launchers (render_mixin.py) to draw the
+    bar instead of the original four text buttons.
   * Still publishes self._galaxy_map_btn_rect / _squad_btn_rect /
     _minimap_btn_rect exactly as the original did, so the game's own,
     untouched click-handling code for those three keeps working unchanged.
   * self._menu_btn_rect is set to None every frame, so the original
     "toggle _menu_open" click handler never fires and the now-orphaned
     dropup (_draw_menu_popup) never draws -- no need to patch it at all.
-  * The former dropup items (stats/friends/missions/run summary/coalition/
-    attendance/market/shop) have no ungated native click path once _menu_open
-    can never become true, so this mod owns their clicks itself via the
-    client.event hook.
+  * The dropup strip and tooltips are drawn from the client.draw hook, which
+    runs after every ordinary window and popover, so they sit above windows
+    (the launcher row itself stays in its retained layer under them, like
+    the game's own).
+  * Category buttons and the dropup strip are mod-drawn, so their clicks are
+    owned here via the client.event hook, which *consumes* them (returns True)
+    so a strip floating over a game window can't also click that window.
   * Right-clicking the Universe Map (galaxy) icon copies the current system
     name to the clipboard and pops a small self-drawn toast confirming it.
-    Native code only ever looks at button 1 (left-click) for this whole
-    launcher row, so button 3 is free for this mod to use outright -- no
-    race with native handling to work around here.
 
-Game 0.5.82 added two Menu entries (Client.py _draw_menu_popup): RUN SUMMARY
-(run_summary_gui.toggle) and SHOP (premium_shop.open_shop, only listed while
-the server enables the shop). Both now get a button here too; the Shop one
-only appears while host._premium_shop.enabled, like the native row, and uses
-the game's own gold gem as its icon.
+Game entries covered: Stats, Friends, Missions, Run Summary, Coalition, Mail
+(mail_gui.toggle), Attendance, Global Market, Mechlings
+(mechlings_client.toggle), Shop. Mail/Mechlings/Run Summary/Shop appear only
+when the running game has them.
 """
 import importlib
 import logging
@@ -47,22 +56,36 @@ _ICON_FILES = {
     "squad": "user_plus.png",
     "minimap": "map.png",
     "stats": "bar_chart_2.png",
-    "friends": "users.png",
+    "friends": "user_check.png",
     "missions": "flag.png",
     "runs": "clipboard.png",
     "coalition": "shield.png",
+    "mail": "mail.png",
     "attendance": "calendar.png",
     "market": "shopping_cart.png",
+    "mechlings": "robot.png",
     "options": "settings.png",
+    "cat:character": "user.png",
+    "cat:social": "users.png",
+    "cat:economy": "dollar_sign.png",
 }
 
-# Items this mod owns clicks for (galaxy/squad/minimap keep native handling).
-_MOD_OWNED_KEYS = (
-    "stats", "friends", "missions", "runs", "coalition", "attendance",
-    "market", "shop", "options")
+# (category key, title, member keys in display order)
+_CATEGORIES = (
+    ("character", "Character", ("stats", "missions", "runs", "mechlings")),
+    ("social", "Social", ("friends", "coalition", "mail")),
+    ("economy", "Economy", ("market", "attendance", "shop")),
+)
+
+# Direct buttons this mod owns the click for (galaxy/squad/minimap keep native
+# handling; dropup members and category buttons are handled separately).
+_MOD_OWNED_KEYS = ("options",)
 
 _icons = {}
-_item_rects = {}
+_item_rects = {}          # direct row buttons, incl. "cat:<key>" categories
+_dropup_rects = {}        # member key -> rect, for the open category only
+_dropup_strip = [None]    # backdrop rect of the open dropup
+_open_category = [None]   # key of the category whose dropup is open
 _install_path = [None]
 _original_draw_hud_launchers = None
 _patched_class = None
@@ -106,7 +129,8 @@ _pending_open_shop = [False]
 
 
 def _game_module(name):
-    """A loose game module (run_summary_gui, premium_shop), or None. Client.py
+    """A loose game module (run_summary_gui, premium_shop, mail_gui,
+    mechlings_client), or None. Client.py
     imports both itself, so they are normally already in sys.modules."""
     module = sys.modules.get(name)
     if module is not None:
@@ -138,6 +162,38 @@ def _shop_state(host):
         return False, False
     return (bool(getattr(shop, "enabled", False)),
             bool(getattr(shop, "open", False)))
+
+
+def _menu_window_state(host, attr):
+    """(open, attention, meta) of a Menu window that has a menu_meta() (Mail,
+    Mechlings), or None when this game build doesn't have it."""
+    state = getattr(host, attr, None)
+    if state is None:
+        return None
+    try:
+        meta, attention = state.menu_meta()
+    except Exception:
+        meta, attention = "", False
+    return bool(getattr(state, "open", False)), bool(attention), str(meta or "")
+
+
+def _toggle_menu_window(host, module_name):
+    """What the Menu's MAIL / MECHLINGS rows call: <module>.toggle(host), then
+    close the galaxy map like the native click handler does."""
+    module = _game_module(module_name)
+    if module is None:
+        return
+    module.toggle(host)
+    if host._galaxy_map_open:
+        host._close_galaxy_map()
+
+
+def _open_mail(host):
+    _toggle_menu_window(host, "mail_gui")
+
+
+def _open_mechlings(host):
+    _toggle_menu_window(host, "mechlings_client")
 
 
 def _open_runs(host):
@@ -257,11 +313,143 @@ _ACTIONS = {
     "missions": _open_missions,
     "runs": _open_runs,
     "coalition": lambda host: host._toggle_coalition_panel(),
+    "mail": _open_mail,
+    "mechlings": _open_mechlings,
     "attendance": _open_attendance,
     "market": _open_market,
     "shop": _open_shop,
     "options": _open_options,
 }
+
+
+_ui = [None]   # the latest frame's layout/entries, shared with the overlay
+_UI_STALE = 0.5  # seconds; the overlay skips a layout the launcher stopped drawing
+
+
+def _draw_button(pygame, host, screen, key, rect, ui, hover_pos):
+    active, attention, _title, _subtitle = ui["entries"][key]
+    hover = rect.collidepoint(hover_pos)
+    s = host._s
+    fill = ((18, 58, 94) if active else
+            (18, 42, 72) if hover else (11, 24, 43))
+    border = (95, 170, 255) if (active or hover) else (56, 88, 138)
+    pygame.draw.rect(screen, fill, rect, border_radius=s(4))
+    pygame.draw.rect(screen, border, rect, 1, border_radius=s(4))
+
+    icon = _icons.get(key)
+    if key == "galaxy":
+        icon_pad = s(10)
+        if icon is not None:
+            icon_rect = icon.get_rect(
+                midleft=(rect.left + icon_pad, rect.centery))
+            screen.blit(icon, icon_rect)
+            text_left = icon_rect.right + s(6)
+        else:
+            text_left = rect.left + icon_pad
+        name_font = host._instrument_font(11, bold=True)
+        name_color = (228, 237, 250) if (active or hover) \
+            else (185, 215, 250)
+        name_label = host._cached_fitted_label(
+            str(ui["system_name"]), name_color, name_font,
+            rect.right - s(8) - text_left)
+        screen.blit(name_label, (
+            text_left, rect.centery - name_label.get_height() // 2))
+    elif key == "shop":
+        gem = _shop_icon()
+        if gem is not None:
+            screen.blit(gem, gem.get_rect(center=rect.center))
+    elif icon is not None:
+        screen.blit(icon, icon.get_rect(center=rect.center))
+
+    if key.startswith("cat:"):
+        # Small caret, bottom-right: up = will drop up, down = open.
+        cx = rect.right - s(8)
+        top = rect.bottom - s(9)
+        bottom = rect.bottom - s(5)
+        tip, base = (bottom, top) if active else (top, bottom)
+        half = s(3)
+        pygame.draw.polygon(
+            screen,
+            (149, 188, 235) if (active or hover) else (96, 132, 186),
+            [(cx - half, base), (cx + half, base), (cx, tip)])
+
+    if attention:
+        dot = s(8)
+        dot_rect = pygame.Rect(
+            rect.right - dot - s(2), rect.top + s(2), dot, dot)
+        pygame.draw.ellipse(screen, (255, 92, 72), dot_rect)
+        pygame.draw.ellipse(screen, (8, 18, 33), dot_rect, 1)
+
+
+def _draw_tooltip(pygame, host, screen, ui, hover_pos):
+    entries, strip = ui["entries"], ui["strip"]
+    hovered = None   # (key, rect, top edge the tooltip sits above)
+    for key, rect in ui["dropup_rects"].items():
+        if rect.collidepoint(hover_pos):
+            hovered = (key, rect, strip.top)
+    if hovered is None:
+        for key in ui["row_keys"]:
+            rect = ui["rects"][key]
+            # An open category's own tooltip would sit under its strip.
+            if rect.collidepoint(hover_pos) and not (
+                    key.startswith("cat:") and entries[key][0]):
+                hovered = (key, rect, rect.top)
+    if hovered is None:
+        return
+
+    key, rect, anchor_top = hovered
+    _active, _attention, title, subtitle = entries[key]
+    s = host._s
+    title_label = host._instrument_font(10, bold=True).render(
+        title.upper(), True, (228, 237, 250))
+    sub_label = None
+    if subtitle:
+        sub_label = host._instrument_font(9, bold=False).render(
+            subtitle.upper(), True, (149, 188, 235))
+
+    pad_t = s(6)
+    line_gap = s(2)
+    content_w = title_label.get_width()
+    content_h = title_label.get_height()
+    if sub_label is not None:
+        content_w = max(content_w, sub_label.get_width())
+        content_h += line_gap + sub_label.get_height()
+
+    box = pygame.Rect(0, 0, content_w + pad_t * 2, content_h + pad_t * 2)
+    box.midbottom = (rect.centerx, anchor_top - s(4))
+    box.left = max(s(4), min(box.left, ui["win_w"] - box.width - s(4)))
+    pygame.draw.rect(screen, (8, 18, 33), box, border_radius=s(3))
+    pygame.draw.rect(screen, (56, 88, 138), box, 1, border_radius=s(3))
+    screen.blit(title_label, (box.x + pad_t, box.y + pad_t))
+    if sub_label is not None:
+        screen.blit(sub_label, (
+            box.x + pad_t,
+            box.y + pad_t + title_label.get_height() + line_gap))
+
+
+def _on_draw(host, pygame, screen, render_target):
+    """client.draw runs after every ordinary window and popover, so the dropup
+    strip and the tooltips live here to sit above them (the launcher row
+    itself stays in its retained layer, like the game's own)."""
+    ui = _ui[0]
+    if (ui is None or _icons_failed[0]
+            or getattr(host, "_disconnected", False)
+            or time.monotonic() - ui["stamp"] > _UI_STALE):
+        return
+    try:
+        hover_pos = pygame.mouse.get_pos()
+        strip = ui["strip"]
+        if strip is not None:
+            s = host._s
+            pygame.draw.rect(screen, (8, 18, 33), strip, border_radius=s(5))
+            pygame.draw.rect(
+                screen, (95, 170, 255), strip, 1, border_radius=s(5))
+            for key, rect in ui["dropup_rects"].items():
+                _draw_button(pygame, host, screen, key, rect, ui, hover_pos)
+        _draw_tooltip(pygame, host, screen, ui, hover_pos)
+    except Exception:
+        _warn_once("overlay", "dropup overlay draw failed; see log")
+        _log.exception("menu-icons: dropup overlay draw failed")
 
 
 def _make_draw_hud_launchers(pygame):
@@ -284,44 +472,87 @@ def _make_draw_hud_launchers(pygame):
         attendance_ready = self._attendance_gui.notification_count
         squad_has_members = bool(self._squad_state.get("members"))
         runs = _runs_state(self)
+        mail = _menu_window_state(self, "_mail")
+        mechlings = _menu_window_state(self, "_mechlings")
         shop_enabled, shop_open = _shop_state(self)
 
-        # (key, active, attention, tooltip title, tooltip subtitle or None)
-        items = [
-            ("galaxy", self._galaxy_map_open, False, "Universe Map", None),
-            ("squad", self._squad_open, squad_has_members, "Squad", None),
-            ("minimap", self._mm_open, False, "Minimap", None),
-            ("stats", self._stats_open, False, "Stats", None),
-            ("friends", self._friends_open, bool(friends_pending),
-             "Friends", None),
-            ("missions", self._mission_log_open, bool(mission_ready),
-             "Missions", None),
-        ]
+        # key -> (active, attention, tooltip title, tooltip subtitle or None)
+        entries = {
+            "galaxy": (bool(self._galaxy_map_open), False, "Universe Map", None),
+            "squad": (bool(self._squad_open), squad_has_members, "Squad", None),
+            "minimap": (bool(self._mm_open), False, "Minimap", None),
+            "stats": (bool(self._stats_open), False, "Stats", "[L]"),
+            "friends": (
+                bool(self._friends_open), bool(friends_pending), "Friends",
+                f"{friends_pending} PENDING" if friends_pending else None),
+            "missions": (
+                bool(self._mission_log_open), bool(mission_ready), "Missions",
+                f"[J]  {mission_ready} READY" if mission_ready else "[J]"),
+            "coalition": (bool(self._coalition_open), False, "Coalition", None),
+            "attendance": (
+                bool(self._attendance_gui.open), bool(attendance_ready),
+                "Attendance Rewards",
+                f"{attendance_ready} READY" if attendance_ready else None),
+            "market": (bool(self._market_open), False, "Global Market", None),
+            "options": (bool(self._esc_menu_open), False, "Options", None),
+        }
         if runs is not None:
-            items.append(("runs", runs[0], runs[1], "Run Summary",
-                          runs[2] or None))
-        items += [
-            ("coalition", self._coalition_open, False, "Coalition", None),
-            ("attendance", self._attendance_gui.open, bool(attendance_ready),
-             "Attendance Rewards", None),
-            ("market", self._market_open, False, "Global Market", None),
-        ]
+            entries["runs"] = (runs[0], runs[1], "Run Summary",
+                               runs[2] or None)
+        if mail is not None:
+            entries["mail"] = (mail[0], mail[1], "Mail", mail[2] or None)
+        if mechlings is not None:
+            entries["mechlings"] = (
+                mechlings[0], mechlings[1], "Mechlings", mechlings[2] or None)
         if shop_enabled:
-            items.append(("shop", shop_open, False, "Shop", None))
-        items.append(
-            ("options", self._esc_menu_open, False, "Options", None))
+            entries["shop"] = (shop_open, False, "Shop", None)
 
-        total_w = (
-            sum(widths.get(key, btn) for key, *_r in items)
-            + (len(items) - 1) * gap)
-        start_x = win_w - pad - total_w
+        # Categories keep only the members this game build / server has.
+        categories = []
+        for cat_key, cat_title, member_keys in _CATEGORIES:
+            members = [k for k in member_keys if k in entries]
+            if not members:
+                continue
+            categories.append((cat_key, members))
+            entries["cat:" + cat_key] = (
+                _open_category[0] == cat_key,
+                any(entries[k][1] for k in members),
+                cat_title,
+                "  ·  ".join(entries[k][2] for k in members))
+        if _open_category[0] not in {c[0] for c in categories}:
+            _open_category[0] = None
 
+        row_keys = (["galaxy", "squad", "minimap"]
+                    + ["cat:" + c[0] for c in categories] + ["options"])
+        total_w = (sum(widths.get(k, btn) for k in row_keys)
+                   + (len(row_keys) - 1) * gap)
+        cursor_x = win_w - pad - total_w
         rects = {}
-        cursor_x = start_x
-        for key, _active, _attention, _title, _sub in items:
+        for key in row_keys:
             w = widths.get(key, btn)
             rects[key] = pygame.Rect(cursor_x, button_y, w, btn)
             cursor_x += w + gap
+
+        # Dropup strip for the open category: centred above its button and
+        # clamped on screen. Geometry is published every frame (hit-testing).
+        strip = None
+        dropup_rects = {}
+        open_members = next(
+            (m for c, m in categories if c == _open_category[0]), None)
+        if open_members is not None:
+            strip_pad = self._s(4)
+            strip_w = (len(open_members) * btn
+                       + (len(open_members) - 1) * gap + strip_pad * 2)
+            strip = pygame.Rect(0, 0, strip_w, btn + strip_pad * 2)
+            anchor = rects["cat:" + _open_category[0]]
+            strip.midbottom = (anchor.centerx, anchor.top - self._s(4))
+            strip.left = max(
+                self._s(4), min(strip.left, win_w - strip_w - self._s(4)))
+            member_x = strip.left + strip_pad
+            for key in open_members:
+                dropup_rects[key] = pygame.Rect(
+                    member_x, strip.top + strip_pad, btn, btn)
+                member_x += btn + gap
 
         # Native click handling for these three is untouched -- just keep
         # publishing the rects it already expects.
@@ -334,104 +565,32 @@ def _make_draw_hud_launchers(pygame):
 
         _item_rects.clear()
         _item_rects.update(rects)
+        _dropup_rects.clear()
+        _dropup_rects.update(dropup_rects)
+        _dropup_strip[0] = strip
 
+        ui = {
+            "entries": entries, "row_keys": row_keys, "rects": rects,
+            "dropup_rects": dict(dropup_rects), "strip": strip,
+            "system_name": system_name, "win_w": win_w,
+            "stamp": time.monotonic(),
+        }
+        _ui[0] = ui
         mouse = pygame.mouse.get_pos()
 
         def draw(draw_ctx):
             screen = draw_ctx.screen
             hover_pos = pygame.mouse.get_pos()
-            hovered = None
-            for key, active, attention, title, subtitle in items:
-                rect = rects[key]
-                hover = rect.collidepoint(hover_pos)
-                fill = ((18, 58, 94) if active else
-                        (18, 42, 72) if hover else (11, 24, 43))
-                border = ((95, 170, 255) if (active or hover)
-                          else (56, 88, 138))
-                pygame.draw.rect(screen, fill, rect, border_radius=self._s(4))
-                pygame.draw.rect(
-                    screen, border, rect, 1, border_radius=self._s(4))
+            for key in row_keys:
+                _draw_button(
+                    pygame, self, screen, key, rects[key], ui, hover_pos)
 
-                icon = _icons.get(key)
-                if key == "galaxy":
-                    icon_pad = self._s(10)
-                    if icon is not None:
-                        icon_rect = icon.get_rect(
-                            midleft=(rect.left + icon_pad, rect.centery))
-                        screen.blit(icon, icon_rect)
-                        text_left = icon_rect.right + self._s(6)
-                    else:
-                        text_left = rect.left + icon_pad
-                    name_font = self._instrument_font(11, bold=True)
-                    name_color = (228, 237, 250) if (active or hover) \
-                        else (185, 215, 250)
-                    name_label = self._cached_fitted_label(
-                        str(system_name), name_color, name_font,
-                        rect.right - self._s(8) - text_left)
-                    screen.blit(name_label, (
-                        text_left,
-                        rect.centery - name_label.get_height() // 2))
-                elif key == "shop":
-                    gem = _shop_icon()
-                    if gem is not None:
-                        screen.blit(gem, gem.get_rect(center=rect.center))
-                elif icon is not None:
-                    screen.blit(icon, icon.get_rect(center=rect.center))
-
-                if attention:
-                    dot = self._s(8)
-                    dot_rect = pygame.Rect(
-                        rect.right - dot - self._s(2), rect.top + self._s(2),
-                        dot, dot)
-                    pygame.draw.ellipse(screen, (255, 92, 72), dot_rect)
-                    pygame.draw.ellipse(screen, (8, 18, 33), dot_rect, 1)
-
-                if hover:
-                    hovered = (title, subtitle, rect)
-
-            if hovered is not None:
-                title, subtitle, rect = hovered
-                title_font = self._instrument_font(10, bold=True)
-                title_label = title_font.render(
-                    title.upper(), True, (228, 237, 250))
-                sub_label = None
-                if subtitle:
-                    sub_font = self._instrument_font(9, bold=False)
-                    sub_label = sub_font.render(
-                        subtitle.upper(), True, (149, 188, 235))
-
-                pad_t = self._s(6)
-                line_gap = self._s(2)
-                content_w = title_label.get_width()
-                content_h = title_label.get_height()
-                if sub_label is not None:
-                    content_w = max(content_w, sub_label.get_width())
-                    content_h += line_gap + sub_label.get_height()
-
-                box = pygame.Rect(
-                    0, 0, content_w + pad_t * 2, content_h + pad_t * 2)
-                box.midbottom = (rect.centerx, rect.top - self._s(4))
-                box.left = max(
-                    self._s(4), min(box.left, win_w - box.width - self._s(4)))
-                pygame.draw.rect(
-                    screen, (8, 18, 33), box, border_radius=self._s(3))
-                pygame.draw.rect(
-                    screen, (56, 88, 138), box, 1, border_radius=self._s(3))
-                screen.blit(title_label, (box.x + pad_t, box.y + pad_t))
-                if sub_label is not None:
-                    screen.blit(sub_label, (
-                        box.x + pad_t,
-                        box.y + pad_t + title_label.get_height() + line_gap))
-
+        # The row only: the dropup strip and tooltips are drawn by _on_draw,
+        # above the game's windows. entries holds the open flags, attention
+        # dots and subtitles the row's look depends on.
         state_key = (
-            win_w, win_h, self._uk, system_name, int(attendance_ready),
-            int(mission_ready), int(friends_pending),
-            bool(self._galaxy_map_open), bool(self._squad_open),
-            bool(self._mm_open), bool(self._stats_open),
-            bool(self._friends_open), bool(self._mission_log_open),
-            bool(self._coalition_open), bool(self._attendance_gui.open),
-            bool(self._market_open), bool(self._esc_menu_open),
-            squad_has_members, runs, shop_enabled, shop_open, mouse,
+            win_w, win_h, self._uk, system_name,
+            tuple(sorted(entries.items())), mouse,
         )
         self._draw_retained_gpu_layer("hud:launchers", ctx, state_key, draw)
 
@@ -450,6 +609,9 @@ def _make_draw_hud_launchers(pygame):
             except Exception:
                 _icons_failed[0] = True
                 _item_rects.clear()
+                _dropup_rects.clear()
+                _dropup_strip[0] = None
+                _ui[0] = None
                 _log.exception(
                     "menu-icons: icon row failed; using the game's own row")
         return _original_draw_hud_launchers(self, ctx, *args, **kwargs)
@@ -527,28 +689,63 @@ def _copy_system_name(host):
     _toast["shown_at"] = time.time()
 
 
+def _close_dropup():
+    _open_category[0] = None
+
+
 def _on_event(host, pygame, event, screen):
+    if event.type == pygame.KEYDOWN:
+        # Escape stays game-owned; just fold the dropup away alongside it.
+        if event.key == pygame.K_ESCAPE:
+            _close_dropup()
+        return None
     if event.type != pygame.MOUSEBUTTONDOWN:
-        return
+        return None
     # Bail out during full-screen modals the native row would also have
     # been blocked behind, so this doesn't click through them.
     if (getattr(host, "_disconnected", False)
             or getattr(host, "_esc_menu_open", False)
             or getattr(host, "_options_open", False)):
-        return
+        _close_dropup()
+        return None
     pos = event.pos
     if event.button == 3:
         rect = _item_rects.get("galaxy")
         if rect is not None and rect.collidepoint(pos):
             _copy_system_name(host)
-        return
+        return None
     if event.button != 1:
-        return
+        return None
+
+    # Returning True consumes the click so the game's own handling never also
+    # sees it (a dropup floats over whatever window happens to be below it).
+    if _open_category[0] is not None:
+        for key, rect in _dropup_rects.items():
+            if rect.collidepoint(pos):
+                _close_dropup()
+                try:
+                    _ACTIONS[key](host)
+                except Exception:
+                    _log.exception("menu-icons: %s action failed", key)
+                return True
+    for key, rect in _item_rects.items():
+        if key.startswith("cat:") and rect.collidepoint(pos):
+            cat_key = key[4:]
+            _open_category[0] = (
+                None if _open_category[0] == cat_key else cat_key)
+            return True
+    if _open_category[0] is not None:
+        strip = _dropup_strip[0]
+        if strip is not None and strip.collidepoint(pos):
+            return True          # padding between icons: swallow, stay open
+        _close_dropup()          # click elsewhere: fold away, let it through
+
     for key in _MOD_OWNED_KEYS:
         rect = _item_rects.get(key)
         if rect is not None and rect.collidepoint(pos):
             _ACTIONS[key](host)
-            return
+            return None
+    return None
 
 
 def _on_shutdown(**_kwargs):
@@ -563,5 +760,6 @@ def apply(api):
     api.on("client.startup", _on_startup)
     api.on("client.frame.begin", _on_frame_begin)
     api.on("client.event", _on_event)
+    api.on("client.draw", _on_draw)
     api.on("loader.shutdown", _on_shutdown)
     api.logger.info("menu-icons ready, waiting for client.startup")
