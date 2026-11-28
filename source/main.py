@@ -1,10 +1,10 @@
 """Menu Icons: replaces the bottom-right HUD row (Menu/Minimap/Squad/Galaxy +
 the Menu dropup's items) with a RuneScape-style icon bar: a few always-visible
-buttons plus category buttons that drop up into a strip of more icons.
+buttons plus category buttons that drop up into a vertical column of more icons.
 
 Layout (left to right):  Universe Map | Squad | Minimap | Character | Social |
 Economy | Options.  Character, Social and Economy are categories; clicking one
-drops a strip of icons up above it (click again, click elsewhere or press Esc to
+drops a vertical column of icons up above it (click again, click elsewhere or press Esc to
 close):
   * Character: Stats, Missions, Run Summary, Mechlings
   * Social:    Friends, Coalition, Mail
@@ -21,13 +21,13 @@ Approach:
   * self._menu_btn_rect is set to None every frame, so the original
     "toggle _menu_open" click handler never fires and the now-orphaned
     dropup (_draw_menu_popup) never draws -- no need to patch it at all.
-  * The dropup strip and tooltips are drawn from the client.draw hook, which
+  * The dropup column and tooltips are drawn from the client.draw hook, which
     runs after every ordinary window and popover, so they sit above windows
     (the launcher row itself stays in its retained layer under them, like
     the game's own).
-  * Category buttons and the dropup strip are mod-drawn, so their clicks are
+  * Category buttons and the dropup column are mod-drawn, so their clicks are
     owned here via the client.event hook, which *consumes* them (returns True)
-    so a strip floating over a game window can't also click that window.
+    so a column floating over a game window can't also click that window.
   * Right-clicking the Universe Map (galaxy) icon copies the current system
     name to the clipboard and pops a small self-drawn toast confirming it.
 
@@ -384,9 +384,11 @@ def _draw_button(pygame, host, screen, key, rect, ui, hover_pos):
 def _draw_tooltip(pygame, host, screen, ui, hover_pos):
     entries, strip = ui["entries"], ui["strip"]
     hovered = None   # (key, rect, top edge the tooltip sits above)
+    beside = False   # dropup members get the tooltip beside the column
     for key, rect in ui["dropup_rects"].items():
         if rect.collidepoint(hover_pos):
             hovered = (key, rect, strip.top)
+            beside = True
     if hovered is None:
         for key in ui["row_keys"]:
             rect = ui["rects"][key]
@@ -416,7 +418,14 @@ def _draw_tooltip(pygame, host, screen, ui, hover_pos):
         content_h += line_gap + sub_label.get_height()
 
     box = pygame.Rect(0, 0, content_w + pad_t * 2, content_h + pad_t * 2)
-    box.midbottom = (rect.centerx, anchor_top - s(4))
+    if beside:
+        # A column is too tall to sit the tooltip above: put it to the left of
+        # the hovered icon (right of the column when there's no room).
+        box.midright = (strip.left - s(4), rect.centery)
+        if box.left < s(4):
+            box.midleft = (strip.right + s(4), rect.centery)
+    else:
+        box.midbottom = (rect.centerx, anchor_top - s(4))
     box.left = max(s(4), min(box.left, ui["win_w"] - box.width - s(4)))
     pygame.draw.rect(screen, (8, 18, 33), box, border_radius=s(3))
     pygame.draw.rect(screen, (56, 88, 138), box, 1, border_radius=s(3))
@@ -533,26 +542,29 @@ def _make_draw_hud_launchers(pygame):
             rects[key] = pygame.Rect(cursor_x, button_y, w, btn)
             cursor_x += w + gap
 
-        # Dropup strip for the open category: centred above its button and
-        # clamped on screen. Geometry is published every frame (hit-testing).
+        # Dropup column for the open category: stacked vertically, centred
+        # above its button and clamped on screen. Members run top to bottom in
+        # display order. Geometry is published every frame (hit-testing).
         strip = None
         dropup_rects = {}
         open_members = next(
             (m for c, m in categories if c == _open_category[0]), None)
         if open_members is not None:
             strip_pad = self._s(4)
-            strip_w = (len(open_members) * btn
+            strip_h = (len(open_members) * btn
                        + (len(open_members) - 1) * gap + strip_pad * 2)
-            strip = pygame.Rect(0, 0, strip_w, btn + strip_pad * 2)
+            strip_w = btn + strip_pad * 2
+            strip = pygame.Rect(0, 0, strip_w, strip_h)
             anchor = rects["cat:" + _open_category[0]]
             strip.midbottom = (anchor.centerx, anchor.top - self._s(4))
             strip.left = max(
                 self._s(4), min(strip.left, win_w - strip_w - self._s(4)))
-            member_x = strip.left + strip_pad
+            strip.top = max(self._s(4), strip.top)
+            member_y = strip.top + strip_pad
             for key in open_members:
                 dropup_rects[key] = pygame.Rect(
-                    member_x, strip.top + strip_pad, btn, btn)
-                member_x += btn + gap
+                    strip.left + strip_pad, member_y, btn, btn)
+                member_y += btn + gap
 
         # Native click handling for these three is untouched -- just keep
         # publishing the rects it already expects.

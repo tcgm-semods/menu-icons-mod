@@ -3,7 +3,7 @@
     "format": "star-empire-mod",
     "mod_id": "menu-icons",
     "name": "Menu Icons",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "author": "wkthedev",
     "description": "Replaces the bottom-right HUD row and its Menu dropup with a RuneScape-style icon bar: Universe Map, Squad and Minimap, plus Character, Social and Economy buttons that drop up into more icons (Stats, Missions, Run Summary, Mechlings, Friends, Coalition, Mail, Market, Attendance, Shop), and Options.",
     "loader_api": 2,

@@ -2,8 +2,8 @@
 
 Replaces the bottom-right HUD row (Menu, Minimap, Squad, Galaxy plus the Menu
 button's dropup) with a RuneScape-style icon bar. Universe Map, Squad, Minimap
-and Options are direct buttons; three category buttons drop up into a strip of
-more icons:
+and Options are direct buttons; three category buttons drop up into a vertical
+column of more icons:
 
 - **Character**: Stats, Missions, Run Summary, Mechlings
 - **Social**: Friends, Coalition, Mail
